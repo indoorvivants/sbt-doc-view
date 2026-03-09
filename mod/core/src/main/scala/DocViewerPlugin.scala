@@ -142,8 +142,6 @@ private class Server(
       }
     }
 
-    println(extensions)
-
     hasIndex
   }
 

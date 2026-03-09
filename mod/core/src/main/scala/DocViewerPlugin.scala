@@ -145,23 +145,34 @@ private class Server(
       "/",
       (h: HttpExchange) => {
         h.getResponseHeaders().set("Content-type", "text/html")
-        val body = s"""
-        <h1>Dependency docs</h1>
-        <ul>
-          ${mapping
+        val body = s"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dependency Docs</title>
+</head>
+<body style="margin:0;font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#333;line-height:1.6">
+  <div style="max-width:800px;margin:0 auto;padding:2rem">
+    <h1 style="font-weight:300;font-size:2rem;margin-bottom:1.5rem;color:#222">Dependency Docs</h1>
+    <ul style="list-style:none;padding:0;margin:0">
+      ${mapping
             .map {
               case Dep(p, Some(j)) if hasIndex(p) =>
-                s"<li><h2><a href='${p.toString}/index.html'>$p</a></h2></li>"
+                s"""<li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a></li>"""
               case Dep(p, None | Some(_)) =>
-                s"<li><h2>$p (<i>javadoc jar not found or no docs in the jar</i>)</h2></li>"
+                s"""<li style="margin-bottom:0.75rem"><div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
             }
             .mkString("\n")}
-        </ul>
-        """
+    </ul>
+  </div>
+</body>
+</html>"""
 
-        h.sendResponseHeaders(200, body.length)
+        val bytes = body.getBytes("UTF-8")
+        h.sendResponseHeaders(200, bytes.length)
         val resp = h.getResponseBody()
-        resp.write(body.getBytes())
+        resp.write(bytes)
         h.close()
       }
     )

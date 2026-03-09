@@ -30,8 +30,8 @@ private[docviewer] object Handle {
 object DocViewerPlugin extends AutoPlugin {
   override def trigger = allRequirements
   object autoImport {
-    val docViewStart = taskKey[Unit](
-      "Doc view: start or restart the doc server"
+    val docViewStart = inputKey[Unit](
+      "Doc view: start or restart the doc server (pass port number as first parameter, otherwise a random one will be chosen)"
     )
     val docViewStop = taskKey[Unit](
       "Doc view: stop the server"
@@ -49,6 +49,13 @@ object DocViewerPlugin extends AutoPlugin {
         Handle.stop()
       },
       docViewStart := {
+        import complete.DefaultParsers._
+        import scala.sys.process._
+
+        val args = spaceDelimited("<port>").parsed
+
+        val port = args.headOption.map(_.toInt)
+
         val logger = sLog.value
         val compileCP = (Compile / dependencyClasspath).value
         val javadocs = compileCP.flatMap { f =>
@@ -67,7 +74,7 @@ object DocViewerPlugin extends AutoPlugin {
           }
         }
 
-        new Server(javadocs, sLog.value).start()
+        new Server(javadocs, sLog.value, port).start()
 
       }
     )
@@ -77,7 +84,8 @@ private case class Dep(moduleId: String, javadoc: Option[java.nio.file.Path])
 
 private class Server(
     mapping: Seq[Dep],
-    log: sbt.Logger
+    log: sbt.Logger,
+    bindPort: Option[Int]
 ) {
 
   def setupContext(
@@ -160,7 +168,7 @@ private class Server(
 
     Handle.set(serv)
 
-    serv.bind(new InetSocketAddress("localhost", 4599), 5)
+    serv.bind(new InetSocketAddress("localhost", bindPort.getOrElse(0)), 5)
     serv.start()
 
     val host = serv.getAddress().getHostString()

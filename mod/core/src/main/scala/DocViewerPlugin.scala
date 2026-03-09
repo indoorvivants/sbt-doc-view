@@ -97,16 +97,31 @@ private class Server(
     val zf = new ZipFile(javadoc.toFile)
     val entries = zf.entries()
 
-    def serve(entry: ZipEntry): HttpHandler =
+    val extensions = collection.mutable.Set.empty[String]
+
+    def serve(entry: ZipEntry): HttpHandler = {
+      entry.getName().split('.').lastOption.foreach(extensions.add)
+
       (h: HttpExchange) => {
         def setContentType(name: String) = {
           val head = h.getResponseHeaders()
-          if (name.endsWith(".html"))
-            head.set("Content-type", "text/html")
-          if (name.endsWith(".js"))
-            head.set("Content-type", "text/javascript")
-          if (name.endsWith(".json"))
-            head.set("Content-type", "application/json")
+
+          name
+            .split('.')
+            .lastOption
+            .collect {
+              case "html"  => "text/html"
+              case "js"    => "text/javascript"
+              case "json"  => "application/json"
+              case "woff"  => "application/woff"
+              case "woff2" => "application/woff2"
+              case "png"   => "image/png"
+              case "ico"   => "image/vnd.microsoft.icon"
+              case "map"   => "application/json"
+            }
+            .foreach { str =>
+              head.set("Content-type", str)
+            }
         }
         setContentType(entry.getName())
         val contents = zf.getInputStream(entry)
@@ -115,6 +130,7 @@ private class Server(
         contents.transferTo(resp)
         h.close()
       }
+    }
 
     var hasIndex = false
 
@@ -125,6 +141,8 @@ private class Server(
         serv.createContext(base + "/" + entry.getName(), serve(entry))
       }
     }
+
+    println(extensions)
 
     hasIndex
   }
@@ -139,13 +157,12 @@ private class Server(
       .toMap
       .withDefaultValue(false)
 
-    println(hasIndex)
-
     serv.createContext(
       "/",
       (h: HttpExchange) => {
-        h.getResponseHeaders().set("Content-type", "text/html")
-        val body = s"""<!DOCTYPE html>
+        if (h.getRequestURI().getPath() == "/") {
+          h.getResponseHeaders().set("Content-type", "text/html")
+          val body = s"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -157,22 +174,25 @@ private class Server(
     <h1 style="font-weight:300;font-size:2rem;margin-bottom:1.5rem;color:#222">Dependency Docs</h1>
     <ul style="list-style:none;padding:0;margin:0">
       ${mapping
-            .map {
-              case Dep(p, Some(j)) if hasIndex(p) =>
-                s"""<li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a></li>"""
-              case Dep(p, None | Some(_)) =>
-                s"""<li style="margin-bottom:0.75rem"><div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
-            }
-            .mkString("\n")}
+              .map {
+                case Dep(p, Some(j)) if hasIndex(p) =>
+                  s"""<li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a><br><small>Serving from ${j}</small></li>"""
+                case Dep(p, None | Some(_)) =>
+                  s"""<li style="margin-bottom:0.75rem"><div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
+              }
+              .mkString("\n")}
     </ul>
   </div>
 </body>
 </html>"""
 
-        val bytes = body.getBytes("UTF-8")
-        h.sendResponseHeaders(200, bytes.length)
-        val resp = h.getResponseBody()
-        resp.write(bytes)
+          val bytes = body.getBytes("UTF-8")
+          h.sendResponseHeaders(200, bytes.length)
+          val resp = h.getResponseBody()
+          resp.write(bytes)
+        } else {
+          h.sendResponseHeaders(404, 0)
+        }
         h.close()
       }
     )

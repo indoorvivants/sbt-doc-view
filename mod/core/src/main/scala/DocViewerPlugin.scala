@@ -57,7 +57,7 @@ object DocViewerPlugin extends AutoPlugin {
         val port = args.headOption.map(_.toInt)
 
         val logger = sLog.value
-        val compileCP = (Compile / dependencyClasspath).value
+        val compileCP = (Compile / externalDependencyClasspath).value
         val javadocs = compileCP.flatMap { f =>
           val path = f.data.toPath()
           val name = path.getFileName().toString
@@ -70,11 +70,16 @@ object DocViewerPlugin extends AutoPlugin {
           } else None
 
           f.metadata.get(AttributeKey[ModuleID]("moduleID")).map { n =>
+            println(s"$n -- ${n.crossVersion}")
             Dep(n.organization + "/" + n.name + "/" + n.revision, docJarMaybe)
           }
         }
 
-        new Server(javadocs, sLog.value, port).start()
+        val sorted = javadocs.sortBy { dep =>
+          (dep.javadoc.isDefined, dep.moduleId)
+        }
+
+        new Server(sorted, sLog.value, port).start()
 
       }
     )
@@ -118,6 +123,7 @@ private class Server(
               case "png"   => "image/png"
               case "ico"   => "image/vnd.microsoft.icon"
               case "map"   => "application/json"
+              case "svg"   => "image/svg+xml"
             }
             .foreach { str =>
               head.set("Content-type", str)

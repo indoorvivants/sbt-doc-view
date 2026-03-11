@@ -166,7 +166,21 @@ private class Server(
       (h: HttpExchange) => {
         if (h.getRequestURI().getPath() == "/") {
           h.getResponseHeaders().set("Content-type", "text/html")
-          val body = s"""<!DOCTYPE html>
+
+          val listing = mapping
+            .map {
+              case Dep(p, Some(j)) if hasIndex(p) =>
+                s"""
+                      <li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a>
+                      </li>"""
+              case Dep(p, None | Some(_)) =>
+                s"""<li style="margin-bottom:0.75rem">
+                      <div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
+            }
+            .mkString("\n")
+
+          val body = s"""
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -177,17 +191,7 @@ private class Server(
   <div style="max-width:800px;margin:0 auto;padding:2rem">
     <h1 style="font-weight:300;font-size:2rem;margin-bottom:1.5rem;color:#222">Dependency Docs</h1>
     <ul style="list-style:none;padding:0;margin:0">
-      ${mapping
-              .map {
-                case Dep(p, Some(j)) if hasIndex(p) =>
-                  s"""
-                  <li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a>
-                  </li>"""
-                case Dep(p, None | Some(_)) =>
-                  s"""<li style="margin-bottom:0.75rem">
-                  <div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
-              }
-              .mkString("\n")}
+      $listing
     </ul>
   </div>
 </body>

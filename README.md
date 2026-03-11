@@ -10,7 +10,9 @@ It has no dependencies and starts an HTTP server using built-in JDK server.
 
 ## Getting started
 
-Add this to your `project/plugins.sbt` (find the version on github releases or on Scaladex):
+Add this to your `project/plugins.sbt` (find the version on github releases or on [Scaladex](https://index.scala-lang.org/indoorvivants/sbt-doc-view)):
+
+[![sbt-doc-view Scala version support](https://index.scala-lang.org/indoorvivants/sbt-doc-view/sbt-doc-view/latest.svg)](https://index.scala-lang.org/indoorvivants/sbt-doc-view/sbt-doc-view)
 
 ```scala
 addSbtPlugin("com.indoorvivants" % "sbt-doc-view" % "<VERSION>")

@@ -10,6 +10,7 @@ import com.sun.net.httpserver.{HttpServer, HttpHandler, HttpExchange}
 import java.net.InetSocketAddress
 import java.util.zip.ZipFile
 import java.util.zip.ZipEntry
+import sbtcompat.PluginCompat._
 
 private[docviewer] object Handle {
   private var prom: Option[HttpServer] = Option.empty
@@ -45,6 +46,11 @@ object DocViewerPlugin extends AutoPlugin {
 
   override def projectSettings: Seq[Setting[?]] =
     Seq(
+      // stop a possibly running application if the project is reloaded and the state is reset
+      Global / onUnload ~= { onUnload => state =>
+        Handle.stop()
+        onUnload(state)
+      },
       docViewStop := {
         Handle.stop()
       },
@@ -56,10 +62,12 @@ object DocViewerPlugin extends AutoPlugin {
 
         val port = args.headOption.map(_.toInt)
 
+        implicit val conv: xsbti.FileConverter = fileConverter.value
+
         val logger = sLog.value
         val compileCP = (Compile / externalDependencyClasspath).value
         val javadocs = compileCP.flatMap { f =>
-          val path = f.data.toPath()
+          val path = toNioPath(f)
           val name = path.getFileName().toString
           val docJarMaybe = if (name.endsWith(".jar")) {
             val jarPath = path
@@ -69,7 +77,8 @@ object DocViewerPlugin extends AutoPlugin {
             if (Files.exists(jarPath)) Some(jarPath) else None
           } else None
 
-          f.metadata.get(AttributeKey[ModuleID]("moduleID")).map { n =>
+          f.metadata.get(sbtcompat.PluginCompat.moduleIDStr).map { attr =>
+            val n = parseModuleIDStrAttribute(attr)
             println(s"$n -- ${n.crossVersion}")
             Dep(n.organization + "/" + n.name + "/" + n.revision, docJarMaybe)
           }

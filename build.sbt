@@ -20,20 +20,37 @@ inThisBuild(
   )
 )
 
+val Scala212 = "2.12.21"
+val Scala3 = "3.8.4"
+
 lazy val root = project
   .in(file("."))
-  .aggregate(core, example)
+  .aggregate(core.projectRefs *)
+  .aggregate(example)
   .settings(
     publish / skip := true,
     publishLocal / skip := true
   )
 
-lazy val core = project
+lazy val core = projectMatrix
+  .jvmPlatform(Seq(Scala212, Scala3))
   .in(file("mod/core"))
   .settings(
-    scalaVersion := "2.12.21",
+    addSbtPlugin("com.github.sbt" % "sbt2-compat" % "0.1.0"),
     sbtPlugin := true,
     name := "sbt-doc-view",
+    pluginCrossBuild / sbtVersion := {
+      scalaBinaryVersion.value match {
+        case "2.12" => "1.12.11"
+        case _      => "2.0.0-RC14"
+      }
+    },
+    sbtTestDirectory := {
+      scalaBinaryVersion.value match {
+        case "2.12" => (sourceDirectory).value / "sbt-test"
+        case _      => (sourceDirectory).value / "sbt-test-sbt2"
+      }
+    },
     scriptedLaunchOpts := {
       scriptedLaunchOpts.value ++
         Seq("-Xmx1024M", "-Dplugin.version=" + version.value)
@@ -45,7 +62,7 @@ lazy val core = project
 lazy val example = project
   .in(file("mod/example"))
   .settings(
-    scalaVersion := "3.8.2",
+    scalaVersion := Scala3,
     libraryDependencies += "com.lihaoyi" %% "os-lib" % "0.11.8",
     publish / skip := true,
     publishLocal / skip := true

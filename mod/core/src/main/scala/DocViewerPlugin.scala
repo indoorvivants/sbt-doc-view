@@ -8,22 +8,27 @@ import sbt.nio.Keys._
 import java.nio.file.Files
 import com.sun.net.httpserver.{HttpServer, HttpHandler, HttpExchange}
 import java.net.InetSocketAddress
+import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 import java.util.zip.ZipEntry
 import sbtcompat.PluginCompat._
 
 private[docviewer] object Handle {
   private var prom: Option[HttpServer] = Option.empty
+  // track open ZipFiles so we can release file handles on stop/restart
+  private var zips: List[ZipFile] = Nil
 
-  def stop() =
-    prom = prom match {
-      case Some(value) => value.stop(0); None
-      case None        => None
-    }
+  def stop() = {
+    prom.foreach(_.stop(0))
+    prom = None
+    zips.foreach(z => scala.util.Try(z.close()))
+    zips = Nil
+  }
 
-  def set(h: HttpServer) = {
+  def set(h: HttpServer, openZips: Seq[ZipFile]) = {
     stop()
     prom = Some(h)
+    zips = openZips.toList
   }
 
 }
@@ -102,20 +107,28 @@ private class Server(
     bindPort: Option[Int]
 ) {
 
+  // returns the opened ZipFile so the caller can close it on shutdown
   def setupContext(
       serv: HttpServer,
       moduleId: String,
       javadoc: java.nio.file.Path
-  ) = {
+  ): (Boolean, ZipFile) = {
     val base = "/" + moduleId
     val zf = new ZipFile(javadoc.toFile)
     val entries = zf.entries()
 
-    val extensions = collection.mutable.Set.empty[String]
+    // index entries once so the handler does not scan the zip per request
+    val byName = collection.mutable.Map.empty[String, ZipEntry]
+    var hasIndex = false
+    while (entries.hasMoreElements()) {
+      val entry = entries.nextElement()
+      if (!entry.isDirectory()) {
+        byName(entry.getName()) = entry
+        if (entry.getName() == "index.html") hasIndex = true
+      }
+    }
 
-    def serve(entry: ZipEntry): HttpHandler = {
-      entry.getName().split('.').lastOption.foreach(extensions.add)
-
+    def serve(entry: ZipEntry): HttpExchange => Unit = {
       (h: HttpExchange) => {
         def setContentType(name: String) = {
           val head = h.getResponseHeaders()
@@ -139,36 +152,49 @@ private class Server(
             }
         }
         setContentType(entry.getName())
-        val contents = zf.getInputStream(entry)
-        val resp = h.getResponseBody()
-        h.sendResponseHeaders(200, entry.getSize())
-        contents.transferTo(resp)
-        h.close()
+        try {
+          // drain request body so the connection can be reused
+          h.getRequestBody().close()
+          val contents = zf.getInputStream(entry)
+          val size = entry.getSize()
+          // 0 = unknown length (chunked); -1 is invalid when we intend to send a body
+          h.sendResponseHeaders(200, if (size >= 0) size else 0)
+          val resp = h.getResponseBody()
+          try contents.transferTo(resp)
+          finally {
+            contents.close()
+            resp.close()
+          }
+        } finally h.close()
       }
     }
 
-    var hasIndex = false
-
-    while (entries.hasMoreElements()) {
-      val entry: ZipEntry = entries.nextElement()
-      if (!entry.isDirectory()) {
-        if (entry.getName() == "index.html") hasIndex = true
-        serv.createContext(base + "/" + entry.getName(), serve(entry))
+    // one context per module — route inside instead of thousands of per-file contexts
+    serv.createContext(
+      base + "/",
+      (h: HttpExchange) => {
+        val path = h.getRequestURI().getPath().stripPrefix(base + "/")
+        byName.get(path) match {
+          case Some(entry) => serve(entry)(h)
+          case None =>
+            h.sendResponseHeaders(404, -1)
+            h.close()
+        }
       }
-    }
+    )
 
-    hasIndex
+    (hasIndex, zf)
   }
 
   def start() = {
     val serv = HttpServer.create()
 
-    val hasIndex = mapping
-      .collect { case Dep(p, Some(j)) =>
-        p -> setupContext(serv, p, j)
-      }
-      .toMap
-      .withDefaultValue(false)
+    val setup = mapping.collect { case Dep(p, Some(j)) =>
+      val (hasIdx, zf) = setupContext(serv, p, j)
+      (p, hasIdx, zf)
+    }
+    val hasIndex = setup.map { case (p, h, _) => p -> h }.toMap.withDefaultValue(false)
+    val openZips = setup.map { case (_, _, z) => z }
 
     serv.createContext(
       "/",
@@ -211,15 +237,18 @@ private class Server(
           val resp = h.getResponseBody()
           resp.write(bytes)
         } else {
-          h.sendResponseHeaders(404, 0)
+          // -1 means "no response body"; 0 would signal chunked and hang the client
+          h.sendResponseHeaders(404, -1)
         }
         h.close()
       }
     )
 
-    Handle.set(serv)
-
     serv.bind(new InetSocketAddress("localhost", bindPort.getOrElse(0)), 5)
+    // default executor is synchronous — one slow client would block all others
+    serv.setExecutor(Executors.newCachedThreadPool())
+    // publish handle only after bind so a concurrent stop() cannot race
+    Handle.set(serv, openZips)
     serv.start()
 
     val host = serv.getAddress().getHostString()

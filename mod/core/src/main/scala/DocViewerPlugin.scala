@@ -82,10 +82,22 @@ object DocViewerPlugin extends AutoPlugin {
             if (Files.exists(jarPath)) Some(jarPath) else None
           } else None
 
+          val sourcesJar = if (name.endsWith(".jar")) {
+            val jarPath = path
+              .getParent()
+              .resolve(name.stripSuffix(".jar") + "-sources.jar")
+
+            if (Files.exists(jarPath)) Some(jarPath) else None
+          } else None
+
           f.metadata.get(sbtcompat.PluginCompat.moduleIDStr).map { attr =>
             val n = parseModuleIDStrAttribute(attr)
             println(s"$n -- ${n.crossVersion}")
-            Dep(n.organization + "/" + n.name + "/" + n.revision, docJarMaybe)
+            Dep(
+              n.organization + "/" + n.name + "/" + n.revision,
+              docJarMaybe,
+              sourcesJar
+            )
           }
         }
 
@@ -99,7 +111,11 @@ object DocViewerPlugin extends AutoPlugin {
     )
 }
 
-private case class Dep(moduleId: String, javadoc: Option[java.nio.file.Path])
+private case class Dep(
+    moduleId: String,
+    javadoc: Option[java.nio.file.Path],
+    source: Option[java.nio.file.Path]
+)
 
 private class Server(
     mapping: Seq[Dep],
@@ -107,13 +123,48 @@ private class Server(
     bindPort: Option[Int]
 ) {
 
+  // shared by doc + sources handlers: stream a zip entry, close everything on the way out
+  private def serveEntry(
+      zf: ZipFile,
+      entry: ZipEntry,
+      contentTypeOverride: Option[String] = None
+  )(h: HttpExchange): Unit = {
+    val head = h.getResponseHeaders()
+    val ct = contentTypeOverride.orElse {
+      entry.getName().split('.').lastOption.collect {
+        case "html"  => "text/html"
+        case "js"    => "text/javascript"
+        case "json"  => "application/json"
+        case "woff"  => "application/woff"
+        case "woff2" => "application/woff2"
+        case "png"   => "image/png"
+        case "ico"   => "image/vnd.microsoft.icon"
+        case "map"   => "application/json"
+        case "svg"   => "image/svg+xml"
+      }
+    }
+    ct.foreach(head.set("Content-type", _))
+    try {
+      h.getRequestBody().close()
+      val contents = zf.getInputStream(entry)
+      val size = entry.getSize()
+      h.sendResponseHeaders(200, if (size >= 0) size else 0)
+      val resp = h.getResponseBody()
+      try contents.transferTo(resp)
+      finally {
+        contents.close()
+        resp.close()
+      }
+    } finally h.close()
+  }
+
   // returns the opened ZipFile so the caller can close it on shutdown
-  def setupContext(
+  def setupDocContext(
       serv: HttpServer,
       moduleId: String,
       javadoc: java.nio.file.Path
   ): (Boolean, ZipFile) = {
-    val base = "/" + moduleId
+    val base = "/" + moduleId + "/doc"
     val zf = new ZipFile(javadoc.toFile)
     val entries = zf.entries()
 
@@ -128,55 +179,14 @@ private class Server(
       }
     }
 
-    def serve(entry: ZipEntry): HttpExchange => Unit = {
-      (h: HttpExchange) => {
-        def setContentType(name: String) = {
-          val head = h.getResponseHeaders()
-
-          name
-            .split('.')
-            .lastOption
-            .collect {
-              case "html"  => "text/html"
-              case "js"    => "text/javascript"
-              case "json"  => "application/json"
-              case "woff"  => "application/woff"
-              case "woff2" => "application/woff2"
-              case "png"   => "image/png"
-              case "ico"   => "image/vnd.microsoft.icon"
-              case "map"   => "application/json"
-              case "svg"   => "image/svg+xml"
-            }
-            .foreach { str =>
-              head.set("Content-type", str)
-            }
-        }
-        setContentType(entry.getName())
-        try {
-          // drain request body so the connection can be reused
-          h.getRequestBody().close()
-          val contents = zf.getInputStream(entry)
-          val size = entry.getSize()
-          // 0 = unknown length (chunked); -1 is invalid when we intend to send a body
-          h.sendResponseHeaders(200, if (size >= 0) size else 0)
-          val resp = h.getResponseBody()
-          try contents.transferTo(resp)
-          finally {
-            contents.close()
-            resp.close()
-          }
-        } finally h.close()
-      }
-    }
-
-    // one context per module — route inside instead of thousands of per-file contexts
     serv.createContext(
       base + "/",
       (h: HttpExchange) => {
-        val path = h.getRequestURI().getPath().stripPrefix(base + "/")
+        val raw = h.getRequestURI().getPath().stripPrefix(base + "/")
+        val path = if (raw.isEmpty) "index.html" else raw
         byName.get(path) match {
-          case Some(entry) => serve(entry)(h)
-          case None =>
+          case Some(entry) => serveEntry(zf, entry)(h)
+          case None        =>
             h.sendResponseHeaders(404, -1)
             h.close()
         }
@@ -186,31 +196,161 @@ private class Server(
     (hasIndex, zf)
   }
 
+  // mounts /<moduleId>/sources (flat listing) and /<moduleId>/sources/<path> (raw file)
+  def setupSourcesContext(
+      serv: HttpServer,
+      moduleId: String,
+      sourcesJar: java.nio.file.Path
+  ): ZipFile = {
+    val base = "/" + moduleId + "/sources"
+    val zf = new ZipFile(sourcesJar.toFile)
+    val entries = zf.entries()
+
+    val byName = collection.mutable.Map.empty[String, ZipEntry]
+    while (entries.hasMoreElements()) {
+      val e = entries.nextElement()
+      if (!e.isDirectory()) byName(e.getName()) = e
+    }
+    val sortedNames = byName.keys.toSeq.sorted
+
+    serv.createContext(
+      base,
+      (h: HttpExchange) => {
+        val fullPath = h.getRequestURI().getPath()
+        if (fullPath == base || fullPath == base + "/") {
+          // flat listing of source files
+          val items = sortedNames
+            .map { n =>
+              s"""<li style="margin:0.15rem 0"><a href="$base/$n" style="color:#0066cc;text-decoration:none;font-family:ui-monospace,monospace;font-size:0.9rem">$n</a></li>"""
+            }
+            .mkString("\n")
+          val body = s"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Sources: $moduleId</title></head>
+<body style="margin:0;font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;color:#333">
+  <div style="max-width:900px;margin:0 auto;padding:2rem">
+    <p><a href="/" style="color:#0066cc;text-decoration:none">&larr; back</a></p>
+    <h1 style="font-weight:300">Sources: $moduleId</h1>
+    <ul style="list-style:none;padding:0">$items</ul>
+  </div>
+</body></html>"""
+          val bytes = body.getBytes("UTF-8")
+          h.getResponseHeaders().set("Content-type", "text/html")
+          try {
+            h.getRequestBody().close()
+            h.sendResponseHeaders(200, bytes.length)
+            val resp = h.getResponseBody()
+            try resp.write(bytes)
+            finally resp.close()
+          } finally h.close()
+        } else {
+          val path = fullPath.stripPrefix(base + "/")
+          byName.get(path) match {
+            // serve source files as plain text so the browser displays them
+            case Some(entry) => serveEntry(zf, entry, Some("text/plain; charset=utf-8"))(h)
+            case None =>
+              h.sendResponseHeaders(404, -1)
+              h.close()
+          }
+        }
+      }
+    )
+
+    zf
+  }
+
   def start() = {
     val serv = HttpServer.create()
 
-    val setup = mapping.collect { case Dep(p, Some(j)) =>
-      val (hasIdx, zf) = setupContext(serv, p, j)
+    val docSetup = mapping.collect { case Dep(p, Some(javadoc), _) =>
+      val (hasIdx, zf) = setupDocContext(serv, p, javadoc)
       (p, hasIdx, zf)
     }
-    val hasIndex = setup.map { case (p, h, _) => p -> h }.toMap.withDefaultValue(false)
-    val openZips = setup.map { case (_, _, z) => z }
+    val hasIndex =
+      docSetup.map { case (p, h, _) => p -> h }.toMap.withDefaultValue(false)
+
+    val srcSetup = mapping.collect { case Dep(p, _, Some(src)) =>
+      setupSourcesContext(serv, p, src)
+    }
+
+    val openZips = docSetup.map { case (_, _, z) => z } ++ srcSetup
+
+    // https://llmstxt.org — plain-text guide for LLMs crawling this server
+    def llmsTxt: String = {
+      val modules = mapping
+        .map { dep =>
+          val p = dep.moduleId
+          val parts = List(
+            if (dep.javadoc.isDefined && hasIndex(p)) Some(s"docs: /$p/doc/")
+            else None,
+            if (dep.source.isDefined) Some(s"sources: /$p/sources") else None
+          ).flatten
+          if (parts.isEmpty) s"- $p (no artifacts)"
+          else s"- $p — ${parts.mkString(", ")}"
+        }
+        .mkString("\n")
+      s"""# sbt-doc-view
+         |
+         |A local HTTP server that exposes scaladoc and source jars of the current sbt project's dependencies.
+         |
+         |## Endpoints
+         |
+         |- `/` — HTML index of all dependencies with links to docs and sources.
+         |- `/llms.txt` — this file.
+         |- `/<module-id>/doc/` — scaladoc index (HTML) for a dependency, if a `-javadoc.jar` was resolved.
+         |- `/<module-id>/doc/<path>` — a specific asset inside the javadoc jar (HTML, JS, CSS, images).
+         |- `/<module-id>/sources` — flat HTML listing of every file inside the `-sources.jar`.
+         |- `/<module-id>/sources/<path>` — raw source file (served as `text/plain; charset=utf-8`).
+         |
+         |`<module-id>` has the form `organization/name/revision` (e.g. `org.typelevel/cats-core_3/2.10.0`).
+         |`<path>` is the full path inside the jar (e.g. `cats/Monad.scala`).
+         |
+         |## How to use
+         |
+         |- To read the API docs of a dependency, fetch `/<module-id>/doc/index.html` and follow links.
+         |- To find a symbol, fetch `/<module-id>/sources` and look for the matching file, then fetch `/<module-id>/sources/<path>`.
+         |- Source files are plain text — safe to read directly without HTML parsing.
+         |
+         |## Modules
+         |
+         |$modules
+         |""".stripMargin
+    }
 
     serv.createContext(
       "/",
       (h: HttpExchange) => {
-        if (h.getRequestURI().getPath() == "/") {
+        val path = h.getRequestURI().getPath()
+        if (path == "/llms.txt") {
+          val bytes = llmsTxt.getBytes("UTF-8")
+          h.getResponseHeaders().set("Content-type", "text/plain; charset=utf-8")
+          try {
+            h.getRequestBody().close()
+            h.sendResponseHeaders(200, bytes.length)
+            val resp = h.getResponseBody()
+            try resp.write(bytes)
+            finally resp.close()
+          } finally h.close()
+        } else if (path == "/") {
           h.getResponseHeaders().set("Content-type", "text/html")
 
           val listing = mapping
             .map {
-              case Dep(p, Some(j)) if hasIndex(p) =>
-                s"""
-                      <li style="margin-bottom:0.75rem"><a href="${p.toString}/index.html" style="display:block;padding:1rem;background:#fff;border-radius:6px;text-decoration:none;color:#0066cc;box-shadow:0 1px 3px rgba(0,0,0,0.1);transition:box-shadow 0.2s" onmouseover="this.style.boxShadow='0 2px 8px rgba(0,0,0,0.15)'" onmouseout="this.style.boxShadow='0 1px 3px rgba(0,0,0,0.1)'">$p</a>
-                      </li>"""
-              case Dep(p, None | Some(_)) =>
-                s"""<li style="margin-bottom:0.75rem">
-                      <div style="padding:1rem;background:#fafafa;border-radius:6px;color:#888">$p <span style="font-size:0.85rem;font-style:italic">— no docs available</span></div></li>"""
+              case dep =>
+                val p = dep.moduleId
+                val docBtn =
+                  if (dep.javadoc.isDefined && hasIndex(p))
+                    s"""<a href="/$p/doc/" style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">docs</a>"""
+                  else
+                    s"""<span style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no docs</span>"""
+                val srcBtn =
+                  if (dep.source.isDefined)
+                    s"""<a href="/$p/sources" style="display:inline-block;padding:0.4rem 0.8rem;background:#28a745;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">sources</a>"""
+                  else
+                    s"""<span style="display:inline-block;padding:0.4rem 0.8rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no sources</span>"""
+                s"""<li style="margin-bottom:0.75rem;padding:1rem;background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;align-items:center;justify-content:space-between">
+                      <span style="color:#222">$p</span>
+                      <span>$docBtn$srcBtn</span>
+                    </li>"""
             }
             .mkString("\n")
 

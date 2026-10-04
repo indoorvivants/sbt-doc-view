@@ -73,26 +73,32 @@ object DocViewerPlugin extends AutoPlugin {
         val compileCP = (Compile / externalDependencyClasspath).value
         val javadocs = compileCP.flatMap { f =>
           val path = toNioPath(f)
+          val m2Path = path.getParent()
           val name = path.getFileName().toString
-          val docJarMaybe = if (name.endsWith(".jar")) {
-            val jarPath = path
-              .getParent()
-              .resolve(name.stripSuffix(".jar") + "-javadoc.jar")
 
-            if (Files.exists(jarPath)) Some(jarPath) else None
+          val docJarMaybe = if (name.endsWith(".jar")) {
+            val ivyPath = path.getParent().getParent().resolve("docs")
+            val docJarName = name.stripSuffix(".jar") + "-javadoc.jar"
+            Option(m2Path.resolve(docJarName))
+              .filter(Files.exists(_))
+              .orElse(
+                Option(ivyPath.resolve(docJarName)).filter(Files.exists(_))
+              )
           } else None
 
           val sourcesJar = if (name.endsWith(".jar")) {
-            val jarPath = path
-              .getParent()
-              .resolve(name.stripSuffix(".jar") + "-sources.jar")
+            val ivyPath = path.getParent().getParent().resolve("srcs")
+            val srcJarName = name.stripSuffix(".jar") + "-sources.jar"
 
-            if (Files.exists(jarPath)) Some(jarPath) else None
+            Option(m2Path.resolve(srcJarName))
+              .filter(Files.exists(_))
+              .orElse(
+                Option(ivyPath.resolve(srcJarName)).filter(Files.exists(_))
+              )
           } else None
 
           f.metadata.get(sbtcompat.PluginCompat.moduleIDStr).map { attr =>
             val n = parseModuleIDStrAttribute(attr)
-            println(s"$n -- ${n.crossVersion}")
             Dep(
               n.organization + "/" + n.name + "/" + n.revision,
               docJarMaybe,
@@ -246,7 +252,8 @@ private class Server(
           val path = fullPath.stripPrefix(base + "/")
           byName.get(path) match {
             // serve source files as plain text so the browser displays them
-            case Some(entry) => serveEntry(zf, entry, Some("text/plain; charset=utf-8"))(h)
+            case Some(entry) =>
+              serveEntry(zf, entry, Some("text/plain; charset=utf-8"))(h)
             case None =>
               h.sendResponseHeaders(404, -1)
               h.close()
@@ -300,6 +307,7 @@ private class Server(
          |- `/<module-id>/doc/<path>` — a specific asset inside the javadoc jar (HTML, JS, CSS, images).
          |- `/<module-id>/sources` — flat HTML listing of every file inside the `-sources.jar`.
          |- `/<module-id>/sources/<path>` — raw source file (served as `text/plain; charset=utf-8`).
+         |- `/mcp` — Model Context Protocol (Streamable HTTP) endpoint exposing the same functionality as tools: `list_modules`, `get_doc_file`, `list_sources`, `get_source_file`.
          |
          |`<module-id>` has the form `organization/name/revision` (e.g. `org.typelevel/cats-core_3/2.10.0`).
          |`<path>` is the full path inside the jar (e.g. `cats/Monad.scala`).
@@ -322,7 +330,8 @@ private class Server(
         val path = h.getRequestURI().getPath()
         if (path == "/llms.txt") {
           val bytes = llmsTxt.getBytes("UTF-8")
-          h.getResponseHeaders().set("Content-type", "text/plain; charset=utf-8")
+          h.getResponseHeaders()
+            .set("Content-type", "text/plain; charset=utf-8")
           try {
             h.getRequestBody().close()
             h.sendResponseHeaders(200, bytes.length)
@@ -334,20 +343,19 @@ private class Server(
           h.getResponseHeaders().set("Content-type", "text/html")
 
           val listing = mapping
-            .map {
-              case dep =>
-                val p = dep.moduleId
-                val docBtn =
-                  if (dep.javadoc.isDefined && hasIndex(p))
-                    s"""<a href="/$p/doc/" style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">docs</a>"""
-                  else
-                    s"""<span style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no docs</span>"""
-                val srcBtn =
-                  if (dep.source.isDefined)
-                    s"""<a href="/$p/sources" style="display:inline-block;padding:0.4rem 0.8rem;background:#28a745;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">sources</a>"""
-                  else
-                    s"""<span style="display:inline-block;padding:0.4rem 0.8rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no sources</span>"""
-                s"""<li style="margin-bottom:0.75rem;padding:1rem;background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;align-items:center;justify-content:space-between">
+            .map { case dep =>
+              val p = dep.moduleId
+              val docBtn =
+                if (dep.javadoc.isDefined && hasIndex(p))
+                  s"""<a href="/$p/doc/" style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#0066cc;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">docs</a>"""
+                else
+                  s"""<span style="display:inline-block;padding:0.4rem 0.8rem;margin-right:0.5rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no docs</span>"""
+              val srcBtn =
+                if (dep.source.isDefined)
+                  s"""<a href="/$p/sources" style="display:inline-block;padding:0.4rem 0.8rem;background:#28a745;color:#fff;border-radius:4px;text-decoration:none;font-size:0.9rem">sources</a>"""
+                else
+                  s"""<span style="display:inline-block;padding:0.4rem 0.8rem;background:#eee;color:#999;border-radius:4px;font-size:0.9rem">no sources</span>"""
+              s"""<li style="margin-bottom:0.75rem;padding:1rem;background:#fff;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,0.1);display:flex;align-items:center;justify-content:space-between">
                       <span style="color:#222">$p</span>
                       <span>$docBtn$srcBtn</span>
                     </li>"""
@@ -384,6 +392,9 @@ private class Server(
       }
     )
 
+    // MCP endpoint (Scala 3 only; stub returns None on 2.12)
+    McpBridge.handler(mapping).foreach(serv.createContext("/mcp", _))
+
     serv.bind(new InetSocketAddress("localhost", bindPort.getOrElse(0)), 5)
     // default executor is synchronous — one slow client would block all others
     serv.setExecutor(Executors.newCachedThreadPool())
@@ -394,7 +405,7 @@ private class Server(
     val host = serv.getAddress().getHostString()
     val port = serv.getAddress().getPort()
 
-    log.info(s"Dependency doc server started on http://$host:$port")
+    log.info(s"Dependency doc server started on http://$host:$port\nHumans, you can visit it directly and use the UI. Agents, visit http://$host:$port/llms.txt for instructions.")
 
   }
 }

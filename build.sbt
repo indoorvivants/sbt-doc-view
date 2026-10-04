@@ -37,6 +37,13 @@ lazy val core = projectMatrix
   .in(file("mod/core"))
   .settings(
     addSbtPlugin("com.github.sbt" % "sbt2-compat" % "0.1.0"),
+    libraryDependencies ++= {
+      if (scalaVersion.value.startsWith("3."))
+        Seq(
+          ("com.indoorvivants" %% "mcp-quick" % "0.2.0+5-94fdf6c7-SNAPSHOT")
+        )
+      else Seq.empty
+    },
     sbtPlugin := true,
     name := "sbt-doc-view",
     pluginCrossBuild / sbtVersion := {
@@ -57,7 +64,7 @@ lazy val core = projectMatrix
     },
     scriptedBufferLog := false
   )
-  .enablePlugins(ScriptedPlugin, SbtPlugin)
+  .enablePlugins(ScriptedPlugin, SbtPlugin, DocViewerPlugin)
 
 lazy val example = project
   .in(file("mod/example"))

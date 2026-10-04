@@ -405,7 +405,13 @@ private class Server(
     val host = serv.getAddress().getHostString()
     val port = serv.getAddress().getPort()
 
-    log.info(s"Dependency doc server started on http://$host:$port\nHumans, you can visit it directly and use the UI. Agents, visit http://$host:$port/llms.txt for instructions.")
+    val welcome = s"""
+    |Dependency doc server started on http://$host:$port:
+    |- Agents, visit http://$host:$port/llms.txt for instructions
+    |- MCP (streamable HTTP) server available on http://$host:$port/mcp
+    """.stripMargin.trim
+
+    log.info(welcome)
 
   }
 }
